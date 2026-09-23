@@ -2,11 +2,44 @@
 
 import streamlit as st
 from backend import stream
+from waiting_messages import get_random_waiting_message
 
 st.set_page_config(
     page_title="System Health Agent",
     layout="centered"
 )
+
+# Custom CSS for round avatars and thinking animation
+st.markdown("""
+<style>
+    .stChatMessage img {
+        border-radius: 50% !important;
+    }
+    
+    @keyframes thinking-bounce {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-5px); }
+    }
+    
+    @keyframes thinking-eyes {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    
+    .thinking-indicator {
+        display: inline-block;
+        animation: thinking-bounce 1s ease-in-out infinite;
+        font-size: 1.5em;
+    }
+    
+    .thinking-text {
+        color: rgba(100, 100, 100, 0.6);
+        font-style: italic;
+        font-size: 0.9em;
+        margin-left: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 st.title("🏥 System Health Agent")
 st.markdown("Operational health checks: system metrics, endpoint status, directory inspection.")
@@ -56,10 +89,22 @@ if prompt := st.chat_input("Ask: Check system metrics, endpoint health, director
     st.session_state.history_by_thread[thread_id] = messages
     
     with st.chat_message("assistant"):
+        # Show funny waiting message with bouncing thinking emoji
+        waiting_placeholder = st.empty()
+        waiting_msg = get_random_waiting_message()
+        waiting_placeholder.markdown(
+            f'<span class="thinking-indicator">🤔</span>'
+            f'<span class="thinking-text">{waiting_msg}</span>',
+            unsafe_allow_html=True
+        )
+        
         text_placeholder = st.empty()
         full_response = ""
         
         for chunk in stream(prompt, thread_id):
+            # Clear waiting message once we get first chunk
+            waiting_placeholder.empty()
+            
             if "model" in chunk:
                 model_msg = chunk["model"]["messages"][0]
                 
