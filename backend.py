@@ -1,4 +1,4 @@
-"""System Health Agent Backend."""
+"""System Health Agent Backend with HITL & Summarization Middleware."""
 
 import os
 from datetime import datetime
@@ -8,7 +8,13 @@ from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.agents import create_agent
-from langchain.agents.middleware import dynamic_prompt, ModelRequest
+from langchain.agents.middleware import (
+    dynamic_prompt, 
+    ModelRequest,
+    HumanInTheLoopMiddleware,
+    SummarizationMiddleware,
+)
+from langgraph.types import Command
 
 # Load env from config folder
 env_path = Path(__file__).parent / "config" / "local.env"
@@ -161,15 +167,41 @@ def dynamic_system_prompt(request: ModelRequest) -> str:
 
 # ============== AGENT ==============
 
+# Human-in-the-Loop: require approval only for inspect_directory_metadata
+hitl_middleware = HumanInTheLoopMiddleware(
+    interrupt_on={
+        "get_system_metrics": False,           # Auto-approve - safe read-only
+        "check_endpoint_health": False,        # Auto-approve - safe read-only
+        "inspect_directory_metadata": {        # Requires human approval
+            "allowed_decisions": ["approve", "edit", "reject"],
+            "description": "Directory inspection requires approval before accessing local filesystem"
+        },
+    },
+    description_prefix="⚠️ HITL Required"
+)
+
+# Summarization: condense history when reaching 6 messages
+summarization_middleware = SummarizationMiddleware(
+    model="google_genai:gemini-flash-lite-latest",
+    trigger=("messages", 6),   # Trigger summarization at 6 messages
+    keep=("messages", 2),      # Keep last 2 messages intact
+    verbose=True,              # Debug: log when summarization happens
+)
+
 health_agent = create_agent(
     llm,
     tools,
-    middleware=[dynamic_system_prompt],
-    checkpointer=memory
+    middleware=[
+        dynamic_system_prompt,
+        hitl_middleware,
+        summarization_middleware,
+    ],
+    checkpointer=memory  # Required for HITL to persist state across interrupts
 )
 
 
 def stream(text: str, thread_id: str):
+    """Stream agent response. Returns chunks including potential HITL interrupts."""
     config = {"configurable": {"thread_id": thread_id}}
     for chunk in health_agent.stream(
         {"messages": [{"role": "user", "content": text}]},
@@ -177,6 +209,28 @@ def stream(text: str, thread_id: str):
         stream_mode="updates"
     ):
         yield chunk
+
+
+def resume_with_decision(thread_id: str, decisions: list[dict]):
+    """
+    Resume paused agent with human decisions.
+    
+    Args:
+        thread_id: Same thread_id used in original invoke
+        decisions: List of decision dicts, e.g.:
+            [{"type": "approve"}]
+            [{"type": "reject", "message": "Not allowed"}]
+            [{"type": "edit", "edited_action": {"name": "inspect_directory_metadata", "args": {"dir_path": "./src/tools"}}}]
+    """
+   
+    
+    config = {"configurable": {"thread_id": thread_id}}
+    result = health_agent.invoke(
+        Command(resume={"decisions": decisions}),
+        config=config,
+        version="v2"
+    )
+    return result
 
 
 def save_graph_png():

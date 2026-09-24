@@ -1,7 +1,7 @@
-"""System Health Agent - Streamlit Frontend."""
+"""System Health Agent - Streamlit Frontend with HITL Support."""
 
 import streamlit as st
-from backend import stream
+from backend import stream, resume_with_decision
 from waiting_messages import get_random_waiting_message
 
 st.set_page_config(
@@ -38,6 +38,20 @@ st.markdown("""
         font-size: 0.9em;
         margin-left: 8px;
     }
+    
+    .hitl-warning {
+        background-color: #fff3cd;
+        border: 1px solid #ffc107;
+        border-radius: 8px;
+        padding: 16px;
+        margin: 10px 0;
+    }
+    
+    .hitl-title {
+        color: #856404;
+        font-weight: bold;
+        font-size: 1.1em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -48,6 +62,10 @@ st.markdown("Operational health checks: system metrics, endpoint status, directo
 if "history_by_thread" not in st.session_state:
     st.session_state.history_by_thread = {}
 
+# HITL pending state
+if "pending_hitl" not in st.session_state:
+    st.session_state.pending_hitl = None
+
 # Sidebar settings
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -56,6 +74,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("Clear Thread History"):
         st.session_state.history_by_thread[thread_id] = []
+        st.session_state.pending_hitl = None
         st.rerun()
 
 # Retrieve or create history for this thread
@@ -79,6 +98,89 @@ for msg in messages:
     elif msg["role"] == "assistant":
         with st.chat_message("assistant"):
             st.markdown(msg["content"])
+    elif msg["role"] == "hitl_decision":
+        st.info(f"✅ HITL Decision: {msg['decision']} for `{msg['tool']}`")
+
+
+def handle_hitl_interrupt(interrupt_data, thread_id):
+    """Display HITL approval UI and handle user decision."""
+    st.markdown("---")
+    st.markdown('<div class="hitl-warning">', unsafe_allow_html=True)
+    st.markdown('<span class="hitl-title">⚠️ Human Approval Required</span>', unsafe_allow_html=True)
+    
+    # Extract action requests from interrupt
+    action_requests = interrupt_data.value.get("action_requests", [])
+    review_configs = interrupt_data.value.get("review_configs", [])
+    
+    for i, action in enumerate(action_requests):
+        tool_name = action.get("name", "unknown")
+        tool_args = action.get("arguments", {})
+        
+        st.write(f"**Tool:** `{tool_name}`")
+        st.write("**Arguments:**")
+        st.json(tool_args)
+        
+        # Store for editing
+        if "edit_path" not in st.session_state:
+            st.session_state.edit_path = tool_args.get("dir_path", "")
+        
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Decision buttons
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("✅ Approve", key="approve_btn", type="primary"):
+            result = resume_with_decision(thread_id, [{"type": "approve"}])
+            st.session_state.pending_hitl = None
+            messages.append({"role": "hitl_decision", "decision": "approved", "tool": tool_name})
+            process_result(result, messages, thread_id)
+            st.rerun()
+    
+    with col2:
+        if st.button("❌ Reject", key="reject_btn"):
+            result = resume_with_decision(thread_id, [{"type": "reject", "message": "User rejected this operation"}])
+            st.session_state.pending_hitl = None
+            messages.append({"role": "hitl_decision", "decision": "rejected", "tool": tool_name})
+            process_result(result, messages, thread_id)
+            st.rerun()
+    
+    with col3:
+        with st.popover("✏️ Edit"):
+            new_path = st.text_input("Edit path:", value=st.session_state.edit_path)
+            if st.button("Submit Edit"):
+                edited_action = {
+                    "name": tool_name,
+                    "args": {"dir_path": new_path}
+                }
+                result = resume_with_decision(thread_id, [{"type": "edit", "edited_action": edited_action}])
+                st.session_state.pending_hitl = None
+                messages.append({"role": "hitl_decision", "decision": f"edited to {new_path}", "tool": tool_name})
+                process_result(result, messages, thread_id)
+                st.rerun()
+
+
+def process_result(result, messages, thread_id):
+    """Process agent result and extract response."""
+    if hasattr(result, 'value') and result.value:
+        final_messages = result.value.get("messages", [])
+        if final_messages:
+            last_msg = final_messages[-1]
+            if hasattr(last_msg, "content") and last_msg.content:
+                content = last_msg.content
+                if isinstance(content, str):
+                    messages.append({"role": "assistant", "content": content})
+                elif isinstance(content, list):
+                    text = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+                    if text:
+                        messages.append({"role": "assistant", "content": text})
+    st.session_state.history_by_thread[thread_id] = messages
+
+
+# Check for pending HITL approval
+if st.session_state.pending_hitl:
+    handle_hitl_interrupt(st.session_state.pending_hitl, thread_id)
+
 
 # User prompt input
 if prompt := st.chat_input("Ask: Check system metrics, endpoint health, directory metadata..."):
@@ -104,6 +206,13 @@ if prompt := st.chat_input("Ask: Check system metrics, endpoint health, director
         for chunk in stream(prompt, thread_id):
             # Clear waiting message once we get first chunk
             waiting_placeholder.empty()
+            
+            # Check for HITL interrupt in chunk
+            if "__interrupt__" in chunk or (hasattr(chunk, "interrupts") and chunk.interrupts):
+                interrupts = chunk.get("__interrupt__") if isinstance(chunk, dict) else chunk.interrupts
+                if interrupts:
+                    st.session_state.pending_hitl = interrupts[0] if isinstance(interrupts, (list, tuple)) else interrupts
+                    st.rerun()
             
             if "model" in chunk:
                 model_msg = chunk["model"]["messages"][0]
