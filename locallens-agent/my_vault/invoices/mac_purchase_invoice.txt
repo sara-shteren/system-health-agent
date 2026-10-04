@@ -1,0 +1,28 @@
+========================================
+           INVOICE #INV-2024-0892
+========================================
+
+Seller: Apple Store Tel Aviv
+Date: August 20, 2024
+
+Bill To:
+  Ministry of Justice
+  29 Salah al-Din Street
+  Jerusalem, Israel
+
+Items:
+---------------------------------------
+MacBook Pro 14" M3 Pro      $2,499.00
+AppleCare+ (3 years)          $399.00
+USB-C Hub Adapter              $79.00
+---------------------------------------
+Subtotal:                   $2,977.00
+VAT (17%):                    $506.09
+---------------------------------------
+TOTAL:                      $3,483.09
+========================================
+
+Payment Method: Credit Card (****4521)
+Payment Date: August 20, 2024
+
+Thank you for your purchase!
